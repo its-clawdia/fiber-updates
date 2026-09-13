@@ -89,11 +89,16 @@ fi
 
 # ── 5. Enrich each matter: attachments + PDF snippet ──────────────────────────
 log "Fetching attachments and extracting PDF snippets ..."
-ENRICHED=$(echo "$NEW_MATTERS" | python3 - "$LEGISTAR_API" <<'PYEOF'
+NEW_MATTERS_FILE=$(mktemp)
+trap 'rm -f "$NEW_MATTERS_FILE"' EXIT
+echo "$NEW_MATTERS" > "$NEW_MATTERS_FILE"
+
+ENRICHED=$(python3 - "$LEGISTAR_API" "$NEW_MATTERS_FILE" <<'PYEOF'
 import json, sys, subprocess, tempfile, os, urllib.request
 
-matters = json.load(sys.stdin)
 api_base = sys.argv[1]
+with open(sys.argv[2]) as f:
+    matters = json.load(f)
 
 def fetch_json(url):
     try:
@@ -115,8 +120,11 @@ def extract_pdf_text(url, max_chars=800):
         os.unlink(tmp)
         if result.returncode == 0:
             text = ' '.join(result.stdout.split())
-            for section in ['RECOMMENDATION', 'BACKGROUND', 'SUMMARY', 'PURPOSE']:
-                idx = text.find(section)
+            # Table-of-contents pages repeat these headings with dot-leader
+            # page numbers before the real section — the LAST occurrence is
+            # the actual body text, not the TOC entry.
+            for section in ['RECOMMENDATION', 'BACKGROUND', 'SUMMARY', 'PURPOSE', 'Overview']:
+                idx = text.rfind(section)
                 if idx > 0:
                     return text[idx:idx + max_chars]
             return text[:max_chars]
@@ -153,11 +161,15 @@ PYEOF
 # ── 6. Generate blog post HTML ────────────────────────────────────────────────
 POST_SLUG="${TODAY}-update"
 POST_FILE="$REPO_DIR/posts/${POST_SLUG}.html"
+ENRICHED_FILE=$(mktemp)
+trap 'rm -f "$NEW_MATTERS_FILE" "$ENRICHED_FILE"' EXIT
+echo "$ENRICHED" > "$ENRICHED_FILE"
 
-python3 - "$ENRICHED" "$TODAY" "$POST_FILE" "$LEGISTAR_WEB" <<'PYEOF'
+python3 - "$ENRICHED_FILE" "$TODAY" "$POST_FILE" "$LEGISTAR_WEB" <<'PYEOF'
 import json, sys
 
-matters = json.loads(sys.argv[1])
+with open(sys.argv[1]) as f:
+    matters = json.load(f)
 today = sys.argv[2]
 post_file = sys.argv[3]
 legistar_web = sys.argv[4]
