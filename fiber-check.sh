@@ -251,12 +251,17 @@ PYEOF
 
 # ── 7. Update index.html (idempotent — skip if this slug is already listed) ──
 python3 -c "
+import re
 index = '$REPO_DIR/index.html'
 slug = '${POST_SLUG}'
 with open(index) as f: content = f.read()
 if f'posts/{slug}.html' in content:
     print('Index already has this post, skipping insert.')
 else:
+    # Drop the 'No updates yet' placeholder once real posts start appearing.
+    content = re.sub(
+        r'\s*<li>\s*<span class=\"date\">&mdash;</span><br>\s*<em>No updates yet[^<]*</em>\s*</li>',
+        '', content)
     entry = '''    <li>
       <span class=\"date\">$TODAY</span><br>
       <a href=\"posts/{slug}.html\">Fiber/Broadband Update &mdash; $TODAY</a>
