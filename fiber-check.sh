@@ -160,18 +160,18 @@ with open(index, 'w') as f: f.write(content)
 print('Index updated.')
 "
 
-# ── 7. Commit and push ────────────────────────────────────────────────────────
-cd "$REPO_DIR"
-git add -A
-git commit -m "Auto-update: ${COUNT} new fiber/broadband matter(s) — ${TODAY}"
-git push origin main
-log "Pushed to GitHub."
-
-# ── 8. Update state ──────────────────────────────────────────────────────────
+# ── 7. Update state ────────────────────────────────────────────────────────────
 python3 -c "
 import json
 s = json.load(open('$STATE_FILE'))
 s['last_check'] = '$(date -u +%Y-%m-%dT%H:%M:%S)'
 json.dump(s, open('$STATE_FILE','w'), indent=2)
 "
+
+# ── 8. Commit and push ────────────────────────────────────────────────────────
+cd "$REPO_DIR"
+git add -A
+git commit -m "Auto-update: ${COUNT} new fiber/broadband matter(s) — ${TODAY}"
+git push origin main
+log "Pushed to GitHub."
 log "Done."
