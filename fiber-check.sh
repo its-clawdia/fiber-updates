@@ -120,13 +120,11 @@ def extract_pdf_text(url, max_chars=800):
         os.unlink(tmp)
         if result.returncode == 0:
             text = ' '.join(result.stdout.split())
-            # Table-of-contents pages repeat these headings with dot-leader
-            # page numbers before the real section, and report titles often
-            # repeat "Summary Report" in page headers/footers — so check
-            # 'Overview' first (marks real body text reliably) before the
-            # generic staff-report headings, which are also more prone to
-            # matching header/footer noise.
-            for section in ['Overview', 'RECOMMENDATION', 'BACKGROUND', 'PURPOSE', 'SUMMARY']:
+            # Staff memos front-load PURPOSE/BACKGROUND (concise, usable as-is).
+            # Long summary/technical reports bury it after a table of contents —
+            # for those, the LAST occurrence of a section heading is the real
+            # body text, not the TOC entry, so rfind beats find there too.
+            for section in ['PURPOSE', 'BACKGROUND', 'Overview', 'RECOMMENDATION', 'SUMMARY']:
                 idx = text.rfind(section)
                 if idx > 0:
                     return text[idx:idx + max_chars]
@@ -139,12 +137,17 @@ enriched = []
 for m in matters:
     mid = m['MatterId']
     attachments = fetch_json(f"{api_base}/matters/{mid}/attachments")
+    # Prefer a memo/staff report (concise, front-loaded PURPOSE/BACKGROUND)
+    # over a generic "summary report" (long technical doc, buried findings).
     pdf_url = None
-    for att in attachments:
-        name = (att.get('MatterAttachmentName') or '').lower()
-        url = att.get('MatterAttachmentHyperlink') or ''
-        if url.endswith('.pdf') and any(k in name for k in ['council report', 'ctc memo', 'staff report', 'memo', 'summary report']):
-            pdf_url = url
+    for priority in (['memo', 'staff report', 'council report', 'ctc memo'], ['summary report']):
+        for att in attachments:
+            name = (att.get('MatterAttachmentName') or '').lower()
+            url = att.get('MatterAttachmentHyperlink') or ''
+            if url.endswith('.pdf') and any(k in name for k in priority):
+                pdf_url = url
+                break
+        if pdf_url:
             break
     if not pdf_url and attachments:
         for att in attachments:
@@ -183,9 +186,6 @@ for m in sorted(matters, key=lambda x: x.get('MatterLastModifiedUtc', '') or '')
     status = m.get('MatterStatusName', '')
     file_no = m.get('MatterFile', '')
     modified = (m.get('MatterLastModifiedUtc') or '').split('T')[0]
-    mid = m.get('MatterId')
-    guid = m.get('MatterGuid')
-    detail_url = f"{legistar_web}/LegislationDetail.aspx?ID={mid}&GUID={guid}" if mid and guid else None
 
     snippet = (m.get('_pdf_text') or '').strip()
     if snippet:
@@ -194,12 +194,18 @@ for m in sorted(matters, key=lambda x: x.get('MatterLastModifiedUtc', '') or '')
     else:
         detail_html = '<div class="detail"><em>No staff report text available.</em></div>'
 
-    links = []
-    if detail_url:
-        links.append(f'<a href="{detail_url}" target="_blank">Legistar record ↗</a>')
+    # NOTE: the Legistar Web API's MatterId/MatterGuid do NOT match the
+    # internal IDs LegislationDetail.aspx expects on the public site (verified
+    # by hand: API gives MatterId=8755, but the site's own detail link for the
+    # same file # 204338 is ID=7145968 — a different, undocumented ID with no
+    # API-exposed mapping). A constructed deep link 404s ("Invalid parameters"),
+    # so we link to the general file-number search instead — not pre-filled,
+    # but real and working — plus the source PDF itself, which IS reliable.
+    search_url = f"{legistar_web}/Legislation.aspx"
+    links = [f'<a href="{search_url}" target="_blank">Search Legistar for file #{file_no} ↗</a>']
     if m.get('_pdf_url'):
         links.append(f'<a href="{m["_pdf_url"]}" target="_blank">staff report PDF ↗</a>')
-    links_html = f'<div class="links">{" &middot; ".join(links)}</div>' if links else ''
+    links_html = f'<div class="links">{" &middot; ".join(links)}</div>'
 
     rows += f"""
     <li>
