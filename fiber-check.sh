@@ -5,7 +5,9 @@
 # What it does:
 #   1. Queries Legistar API for matters modified since last run
 #   2. Filters titles against the watched keyword list (fiber-state.json)
-#   3. Generates an HTML blog post for any matches and pushes to GitHub Pages
+#   3. Enriches each match with its Legistar deep link + a snippet from its
+#      primary staff-report/memo PDF attachment (if any)
+#   4. Generates an HTML blog post for any matches and pushes to GitHub Pages
 #
 # Independent from rengstorff-check.sh — separate repo, separate state.
 
@@ -15,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$SCRIPT_DIR"
 STATE_FILE="$SCRIPT_DIR/fiber-state.json"
 LEGISTAR_API="https://webapi.legistar.com/v1/mountainview"
+LEGISTAR_WEB="https://mountainview.legistar.com"
 TODAY=$(date -u +%Y-%m-%d)
 LOG_PREFIX="[fiber-check $(date -u +%H:%M:%S)]"
 
@@ -84,29 +87,112 @@ json.dump(s, open('$STATE_FILE','w'), indent=2)
   exit 0
 fi
 
-# ── 5. Generate blog post HTML ────────────────────────────────────────────────
+# ── 5. Enrich each matter: attachments + PDF snippet ──────────────────────────
+log "Fetching attachments and extracting PDF snippets ..."
+ENRICHED=$(echo "$NEW_MATTERS" | python3 - "$LEGISTAR_API" <<'PYEOF'
+import json, sys, subprocess, tempfile, os, urllib.request
+
+matters = json.load(sys.stdin)
+api_base = sys.argv[1]
+
+def fetch_json(url):
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception:
+        return []
+
+def extract_pdf_text(url, max_chars=800):
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+            tmp = f.name
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            with open(tmp, 'wb') as f:
+                f.write(r.read())
+        result = subprocess.run(['pdftotext', tmp, '-'], capture_output=True, text=True, timeout=30)
+        os.unlink(tmp)
+        if result.returncode == 0:
+            text = ' '.join(result.stdout.split())
+            for section in ['RECOMMENDATION', 'BACKGROUND', 'SUMMARY', 'PURPOSE']:
+                idx = text.find(section)
+                if idx > 0:
+                    return text[idx:idx + max_chars]
+            return text[:max_chars]
+    except Exception as e:
+        return f"(PDF extraction failed: {e})"
+    return ""
+
+enriched = []
+for m in matters:
+    mid = m['MatterId']
+    attachments = fetch_json(f"{api_base}/matters/{mid}/attachments")
+    pdf_url = None
+    for att in attachments:
+        name = (att.get('MatterAttachmentName') or '').lower()
+        url = att.get('MatterAttachmentHyperlink') or ''
+        if url.endswith('.pdf') and any(k in name for k in ['council report', 'ctc memo', 'staff report', 'memo', 'summary report']):
+            pdf_url = url
+            break
+    if not pdf_url and attachments:
+        for att in attachments:
+            if (att.get('MatterAttachmentHyperlink') or '').endswith('.pdf'):
+                pdf_url = att['MatterAttachmentHyperlink']
+                break
+
+    m['_pdf_text'] = extract_pdf_text(pdf_url) if pdf_url else ''
+    m['_pdf_url'] = pdf_url or ''
+    m['_attachment_count'] = len(attachments)
+    enriched.append(m)
+
+print(json.dumps(enriched))
+PYEOF
+)
+
+# ── 6. Generate blog post HTML ────────────────────────────────────────────────
 POST_SLUG="${TODAY}-update"
 POST_FILE="$REPO_DIR/posts/${POST_SLUG}.html"
 
-python3 - "$NEW_MATTERS" "$TODAY" "$POST_FILE" <<'PYEOF'
+python3 - "$ENRICHED" "$TODAY" "$POST_FILE" "$LEGISTAR_WEB" <<'PYEOF'
 import json, sys
 
 matters = json.loads(sys.argv[1])
 today = sys.argv[2]
 post_file = sys.argv[3]
+legistar_web = sys.argv[4]
 rows = ""
-for m in sorted(matters, key=lambda x: x.get('MatterLastModifiedUtc','') or ''):
-    title = (m.get('MatterTitle') or '').replace('<','&lt;').replace('>','&gt;')
-    mtype = m.get('MatterTypeName','')
-    status = m.get('MatterStatusName','')
-    file_no = m.get('MatterFile','')
+for m in sorted(matters, key=lambda x: x.get('MatterLastModifiedUtc', '') or ''):
+    title = (m.get('MatterTitle') or '').replace('<', '&lt;').replace('>', '&gt;')
+    mtype = m.get('MatterTypeName', '')
+    status = m.get('MatterStatusName', '')
+    file_no = m.get('MatterFile', '')
     modified = (m.get('MatterLastModifiedUtc') or '').split('T')[0]
+    mid = m.get('MatterId')
+    guid = m.get('MatterGuid')
+    detail_url = f"{legistar_web}/LegislationDetail.aspx?ID={mid}&GUID={guid}" if mid and guid else None
+
+    snippet = (m.get('_pdf_text') or '').strip()
+    if snippet:
+        cut = snippet[:600].replace('<', '&lt;').replace('>', '&gt;')
+        detail_html = f'<div class="detail">{cut}{"..." if len(snippet) > 600 else ""}</div>'
+    else:
+        detail_html = '<div class="detail"><em>No staff report text available.</em></div>'
+
+    links = []
+    if detail_url:
+        links.append(f'<a href="{detail_url}" target="_blank">Legistar record ↗</a>')
+    if m.get('_pdf_url'):
+        links.append(f'<a href="{m["_pdf_url"]}" target="_blank">staff report PDF ↗</a>')
+    links_html = f'<div class="links">{" &middot; ".join(links)}</div>' if links else ''
 
     rows += f"""
     <li>
-      <div class="date">{modified}</div>
+      <div class="date">{modified} — {file_no}</div>
       <div><strong>{title}</strong></div>
-      <div class="body">Type: {mtype} &nbsp;|&nbsp; Status: {status} &nbsp;|&nbsp; Legistar #{file_no}</div>
+      <div class="body">Type: {mtype} &nbsp;|&nbsp; Status: {status}</div>
+      {detail_html}
+      {links_html}
     </li>"""
 
 html = f"""<!DOCTYPE html>
@@ -123,6 +209,8 @@ html = f"""<!DOCTYPE html>
     .timeline li {{ margin: 1.8em 0; padding-left: 1.5em; border-left: 3px solid #444; }}
     .timeline .date {{ font-weight: bold; color: #333; }}
     .timeline .body {{ color: #888; font-size: 0.82em; margin-top: 0.3em; }}
+    .timeline .detail {{ color: #444; font-size: 0.9em; margin-top: 0.6em; line-height: 1.5; }}
+    .timeline .links {{ margin-top: 0.4em; font-size: 0.85em; }}
     a {{ color: #1a0dab; }}
     nav {{ margin-bottom: 2em; }}
     footer {{ margin-top: 3em; border-top: 1px solid #ccc; padding-top: 1em; color: #666; font-size: 0.85em; }}
@@ -146,21 +234,25 @@ with open(post_file, "w") as f:
 print(f"Post written: {post_file}")
 PYEOF
 
-# ── 6. Update index.html ───────────────────────────────────────────────────────
+# ── 7. Update index.html (idempotent — skip if this slug is already listed) ──
 python3 -c "
 index = '$REPO_DIR/index.html'
+slug = '${POST_SLUG}'
 with open(index) as f: content = f.read()
-entry = '''    <li>
+if f'posts/{slug}.html' in content:
+    print('Index already has this post, skipping insert.')
+else:
+    entry = '''    <li>
       <span class=\"date\">$TODAY</span><br>
-      <a href=\"posts/${POST_SLUG}.html\">Fiber/Broadband Update &mdash; $TODAY</a>
+      <a href=\"posts/{slug}.html\">Fiber/Broadband Update &mdash; $TODAY</a>
     </li>
-    '''
-content = content.replace('<ul class=\"post-list\">\n', '<ul class=\"post-list\">\n' + entry, 1)
-with open(index, 'w') as f: f.write(content)
-print('Index updated.')
+    '''.format(slug=slug)
+    content = content.replace('<ul class=\"post-list\">\n', '<ul class=\"post-list\">\n' + entry, 1)
+    with open(index, 'w') as f: f.write(content)
+    print('Index updated.')
 "
 
-# ── 7. Update state ────────────────────────────────────────────────────────────
+# ── 8. Update state ────────────────────────────────────────────────────────────
 python3 -c "
 import json
 s = json.load(open('$STATE_FILE'))
@@ -168,7 +260,7 @@ s['last_check'] = '$(date -u +%Y-%m-%dT%H:%M:%S)'
 json.dump(s, open('$STATE_FILE','w'), indent=2)
 "
 
-# ── 8. Commit and push ────────────────────────────────────────────────────────
+# ── 9. Commit and push ────────────────────────────────────────────────────────
 cd "$REPO_DIR"
 git add -A
 git commit -m "Auto-update: ${COUNT} new fiber/broadband matter(s) — ${TODAY}"
