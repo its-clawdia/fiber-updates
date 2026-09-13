@@ -121,9 +121,12 @@ def extract_pdf_text(url, max_chars=800):
         if result.returncode == 0:
             text = ' '.join(result.stdout.split())
             # Table-of-contents pages repeat these headings with dot-leader
-            # page numbers before the real section — the LAST occurrence is
-            # the actual body text, not the TOC entry.
-            for section in ['RECOMMENDATION', 'BACKGROUND', 'SUMMARY', 'PURPOSE', 'Overview']:
+            # page numbers before the real section, and report titles often
+            # repeat "Summary Report" in page headers/footers — so check
+            # 'Overview' first (marks real body text reliably) before the
+            # generic staff-report headings, which are also more prone to
+            # matching header/footer noise.
+            for section in ['Overview', 'RECOMMENDATION', 'BACKGROUND', 'PURPOSE', 'SUMMARY']:
                 idx = text.rfind(section)
                 if idx > 0:
                     return text[idx:idx + max_chars]
